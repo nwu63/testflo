@@ -31,7 +31,6 @@ import time
 
 from fnmatch import fnmatch
 
-from multiprocessing.managers import SyncManager
 from multiprocessing import Process, Queue
 #import Queue
 
@@ -49,33 +48,6 @@ from testflo.profile import setup_profile, finalize_profile
 from testflo.options import get_options
 
 options = get_options()
-
-class _DictHandler(object):
-    def __init__(self):
-        self.dct = {}
-
-    def get_item(self, name):
-        return self.dct[name]
-
-    def set_item(self, name, obj):
-        self.dct[name] = obj
-
-    def remove_item(self, name):
-        del self.dct[name]
-
-_dict_handler = _DictHandler()
-
-class QueueManager(SyncManager): pass
-
-queue = Queue()
-QueueManager.register('get_queue', callable=lambda:queue)
-QueueManager.register('dict_handler', callable=lambda:_dict_handler)
-QueueManager.register('run_test', run_isolated)
-
-# create a server (but don't start it yet) to let us share a queue with tests
-# running in subprocesses.
-_server = QueueManager(address=('', options.port),
-                       authkey=bytes(options.authkey))
 
 def dryrun(input_iter):
     """Iterator added to the pipeline when user only wants
@@ -159,49 +131,42 @@ skip_dirs=site-packages,
         discoverer = TestDiscoverer(dir_exclude=dir_exclude)
         benchmark_file = open(os.devnull, 'a')
 
-    if options.isolated or not options.nompi:
-        _server.start()
+    retval = 0
+    with open(options.outfile, 'w') as report, benchmark_file as bdata:
+        pipeline = [
+            discoverer.get_iter,
+        ]
 
-    try:
-        retval = 0
-        with open(options.outfile, 'w') as report, benchmark_file as bdata:
-            pipeline = [
-                discoverer.get_iter,
-            ]
+        if options.dryrun:
+            pipeline.extend([
+                dryrun,
+            ])
+        else:
+            runner = ConcurrentTestRunner(options)
 
-            if options.dryrun:
+            pipeline.append(runner.get_iter)
+
+            if options.benchmark:
+                pipeline.append(BenchmarkWriter(stream=bdata).get_iter)
+
+            pipeline.extend([
+                ResultPrinter(verbose=options.verbose).get_iter,
+                ResultSummary(options).get_iter,
+            ])
+            if not options.noreport:
+                # mirror results and summary to a report file
                 pipeline.extend([
-                    dryrun,
+                    ResultPrinter(report, verbose=options.verbose).get_iter,
+                    ResultSummary(options, stream=report).get_iter,
                 ])
-            else:
-                runner = ConcurrentTestRunner(options, server=_server)
 
-                pipeline.append(runner.get_iter)
+        if options.maxtime > 0:
+            pipeline.append(TimeFilter(options.maxtime).get_iter)
 
-                if options.benchmark:
-                    pipeline.append(BenchmarkWriter(stream=bdata).get_iter)
+        retval = run_pipeline(tests, pipeline)
 
-                pipeline.extend([
-                    ResultPrinter(verbose=options.verbose).get_iter,
-                    ResultSummary(options).get_iter,
-                ])
-                if not options.noreport:
-                    # mirror results and summary to a report file
-                    pipeline.extend([
-                        ResultPrinter(report, verbose=options.verbose).get_iter,
-                        ResultSummary(options, stream=report).get_iter,
-                    ])
-
-            if options.maxtime > 0:
-                pipeline.append(TimeFilter(options.maxtime).get_iter)
-
-            retval = run_pipeline(tests, pipeline)
-
-            finalize_coverage(options)
-            finalize_profile(options)
-    finally:
-        if options.isolated or not options.nompi:
-            _server.shutdown() # shut down the isolation server
+        finalize_coverage(options)
+        finalize_profile(options)
 
     return retval
 

@@ -6,6 +6,8 @@ import inspect
 import unittest
 import subprocess
 
+from multiprocessing import Process, Queue
+
 from types import FunctionType, ModuleType
 from six.moves import cStringIO
 
@@ -15,6 +17,14 @@ from testflo.profile import start_profile, stop_profile
 from testflo.util import get_module, ismethod, get_memory_usage
 from testflo.devnull import DevNull
 from testflo.options import get_options
+
+try:
+    from mpi4py import MPI
+except ImportError:
+    MPI = None
+
+# so we can retrieve isolated test results
+_result_queue = Queue()
 
 class Test(object):
     """Contains the path to the test function/method, status
@@ -61,78 +71,85 @@ class Test(object):
             else:
                 if testcase is not None:
                     parent = testcase
-                    nprocs = getattr(testcase, 'N_PROCS', 0)
+                    if MPI is not None:
+                        nprocs = getattr(testcase, 'N_PROCS', 0)
                 else:
                     parent = mod
 
         return parent, method, nprocs
 
-    def _run_isolated(self, server):
-        q = server.get_queue()
-        server.run_test(self, q)
-        return q.get()
+    def _run_isolated(self, q):
+        proc = Process(target=_run_test, args=(self, _result_queue))
+        proc.start()
+        proc.join()
 
-    def _run_mpi(self, server):
+        t = _result_queue.get()
+        q.put(t)
+
+        return t
+
+    def _run_mpi(self, q):
         """This runs the test using mpirun in a subprocess,
         then returns the Test object.
         """
 
         try:
-            from distutils import spawn
-            mpirun_exe = None
-            if spawn.find_executable("mpirun") is not None:
-                mpirun_exe = "mpirun"
-            elif spawn.find_executable("mpiexec") is not None:
-                mpirun_exe = "mpiexec"
+            args = [os.path.join(os.path.dirname(__file__), 'mpirun.py')]
 
-            if mpirun_exe is None:
-                raise Exception("mpirun or mpiexec was not found in the system path.")
+            comm = MPI.COMM_SELF.Spawn(sys.executable, args=args,
+                                       maxprocs=self.nprocs)
 
-            cmd = [mpirun_exe, '-n', str(self.nprocs),
-                   sys.executable,
-                   os.path.join(os.path.dirname(__file__), 'mpirun.py'),
-                   self.spec]
+            # send out the test object to the MPI subprocs
+            comm.bcast(self, root=MPI.ROOT)
 
-            # put test object in shared dictionary so all MPI procs can get it
-            dct = server.dict_handler()
-            dct.set_item(self.spec, self)
+            # collect the finished test objects
+            results = comm.gather(None, root=MPI.ROOT)
 
-            p = subprocess.Popen(cmd, env=os.environ)
-            p.wait()
+            self.memory_usage = 0
+            failed = False
+            self.status = 'OK'
+            for i,r in enumerate(results):
+                self.memory_usage += r.memory_usage
+                if not failed and r.status != 'OK':
+                    self.err_msg = "ERROR in rank %d:\n%s" % (i, r.err_msg)
+                    self.status = 'FAIL'
+                    failed = True
 
-            q = server.get_queue()
-            result = q.get()
-
-            #dct.remove_item(self.spec) # cleanup
         except:
             # we generally shouldn't get here, but just in case,
             # handle it so that the main process doesn't hang at the
             # end when it tries to join all of the concurrent processes.
             self.status = 'FAIL'
             self.err_msg = traceback.format_exc()
-            result = self
 
         finally:
+            print("SERVER trying disconn")
+            comm.Disconnect()
+            print("SERVER discon done")
             sys.stdout.flush()
             sys.stderr.flush()
 
-        return result
+        q.put(self)
 
-    def run(self, server=None):
+        return self
+
+    def run(self, q=None):
         """Runs the test, assuming status is not already known."""
         if self.status is not None:
             # premature failure occurred , just return
             return self
 
-        if server is not None:
+        if q is not None:
             if self.mpi and self.nprocs > 0:
-                return self._run_mpi(server)
+                return self._run_mpi(q)
             elif self.isolated:
-                return self._run_isolated(server)
+                return self._run_isolated(q)
 
         # this is for test files without an __init__ file.  This MUST
         # be done before the call to _get_test_parent.
-        sys.path.insert(0, os.path.dirname(self.spec.split(':',1)[0]))
+        old_sys_path = sys.path
+        sys.path = [os.path.dirname(self.spec.split(':',1)[0])]
+        sys.path.extend(old_sys_path)
 
         self.start_time = time.time()
 
@@ -184,12 +201,15 @@ class Test(object):
             self.memory_usage = get_memory_usage()
 
         finally:
-            sys.path = sys.path[1:]
+            sys.path = old_sys_path
 
             stop_coverage()
 
             sys.stderr = old_err
             sys.stdout = old_out
+
+        if q is not None:
+            q.put(self)
 
         return self
 
@@ -210,6 +230,14 @@ class Test(object):
         else:
             return "%s: %s" % (self.spec, self.status)
 
+def _run_test(test, q):
+    try:
+        test.run()
+    except:
+        test.status = 'FAIL'
+        test.err_msg = traceback.format_exc()
+
+    q.put(test)
 
 def _parse_test_path(testspec):
     """Return a tuple of the form (module, testcase, func)

@@ -1,9 +1,10 @@
-
 """
 This is meant to be executed using mpirun.  It is called as a subprocess
 to run an MPI test.
 
 """
+
+from __future__ import print_function
 
 exit_codes = {
     'OK': 0,
@@ -13,69 +14,35 @@ exit_codes = {
 
 if __name__ == '__main__':
     import sys
-    import os
     import traceback
 
-    from multiprocessing.managers import SyncManager
-
     from mpi4py import MPI
-    from testflo.test import Test
+
     from testflo.cover import save_coverage
-    from testflo.options import get_options
 
 
     exitcode = 0  # use 0 for exit code of all ranks != 0 because otherwise,
                   # MPI will terminate other processes
 
-    # connect to the shared queue and dict
-    class QueueManager(SyncManager): pass
-
-    QueueManager.register('get_queue')
-    QueueManager.register('run_test')
-    QueueManager.register('dict_handler')
-    manager = QueueManager(address=('', get_options().port), authkey=b'foo')
-    manager.connect()
-    d = manager.dict_handler()  # test objects keyed by test spec
-    q = None
-
     try:
-        try:
-            comm = MPI.COMM_WORLD
-            test = d.get_item(sys.argv[-1])
-            test.run()
-        except:
-            print(traceback.format_exc())
-            test.status = 'FAIL'
-            test.err_msg = traceback.format_exc()
-
-        # collect results
-        results = comm.gather(test, root=0)
-        if comm.rank == 0:
-            q = manager.get_queue()
-
-            total_mem_usage = sum(r.memory_usage for r in results)
-            test.memory_usage = total_mem_usage
-
-            # check for errors and record error message
-            for r in results:
-                if r.status != 'OK':
-                    test.err_msg = r.err_msg
-                    test.status = 'FAIL'
-                    exitcode = exit_codes[r.status]
-                    break
-
+        parent_comm = MPI.Comm.Get_parent()
+        test = parent_comm.bcast(None, root=0)
+        test.run()
+    except:
+        print(traceback.format_exc())
+        test.status = 'FAIL'
+        test.err_msg = traceback.format_exc()
+    finally:
         save_coverage()
 
-    except Exception:
-        test.err_msg = traceback.format_exc()
-        test.status = 'FAIL'
-        exitcode = exit_codes['FAIL']
+        parent_comm.gather(test, root=0)
 
-    finally:
         sys.stdout.flush()
         sys.stderr.flush()
 
-        if comm.rank == 0 and q is not None:
-            q.put(test)
+        print("CLIENT disconn")
+        parent_comm.Disconnect()
+        print("CLIENT disconn DONE for",MPI.COMM_WORLD.rank)
+        sys.stdout.flush()
 
-        sys.exit(exitcode)
+    sys.exit(exitcode)
