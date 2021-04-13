@@ -28,7 +28,7 @@ import os
 import sys
 import time
 import warnings
-import multiprocessing
+import psutil
 
 from fnmatch import fnmatch, fnmatchcase
 
@@ -123,7 +123,7 @@ skip_dirs=site-packages,
 
     if nprocs is None and options.num_procs is None:
         try:
-            options.num_procs = multiprocessing.cpu_count()
+            options.num_procs = psutil.cpu_count(logical=False)
         except:
             warnings.warn('CPU count could not be determined. Defaulting to 1')
             options.num_procs = 1
