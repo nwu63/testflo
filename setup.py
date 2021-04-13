@@ -86,7 +86,8 @@ setup(name='testflo',
       ],
       license='Apache 2.0',
       install_requires=[
-        'coverage<5.0'
+        'coverage<5.0',
+        'psutil',
       ],
       packages=['testflo'],
       entry_points="""

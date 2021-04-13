@@ -18,6 +18,7 @@ from os.path import join, dirname, basename, isfile,  abspath, split, splitext
 from argparse import ArgumentParser
 
 from testflo.cover import start_coverage, stop_coverage
+import psutil
 
 _store = {}
 
@@ -43,7 +44,7 @@ def _get_parser():
     parser.add_argument('-n', '--numprocs', type=int, action='store',
                         dest='num_procs', metavar='NUM_TEST_PROCS',
                         help='Number of concurrent test processes to run. By default, this will '
-                             'use the number of virtual processors available.  To force tests to '
+                             'use the number of physical cores available.  To force tests to '
                              'run consecutively, specify a value of 1.')
     parser.add_argument('-o', '--outfile', action='store', dest='outfile',
                         metavar='FILE', default='testflo_report.out',
@@ -391,25 +392,11 @@ def read_config_file(cfgfile, options):
 
 
 def get_memory_usage():
-    """return memory usage for the current process"""
+    """return memory usage in MB for the current process"""
     k = 1024.
-    try:
-        # prefer psutil, it works on all platforms including Windows
-        import psutil
-        process = psutil.Process(os.getpid())
-        mem = process.memory_info().rss
-        return mem/(k*k)
-    except ImportError:
-        try:
-            # fall back to getrusage, which works only on Linux and OSX
-            import resource
-            mem = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            if sys.platform == 'darwin':
-                return mem/(k*k)
-            else:
-                return mem/k
-        except:
-            return 0.
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss
+    return mem/(k*k)
 
 
 def elapsed_str(elapsed):
